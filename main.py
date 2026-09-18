@@ -1,363 +1,494 @@
 import os
-import requests
 import json
+import requests
 
 from dotenv import load_dotenv
 from groq import Groq
 
 
-# ==========================================
+# =========================================================
 # LOAD ENVIRONMENT VARIABLES
-# ==========================================
+# =========================================================
 
 load_dotenv()
 
 RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-
-# ==========================================
-# API CONFIGURATION
-# ==========================================
-
-API_URL = "https://jsearch-mega.p.rapidapi.com/search"
-API_HOST = "jsearch-mega.p.rapidapi.com"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
-# ==========================================
+# =========================================================
 # GROQ CLIENT
-# ==========================================
+# =========================================================
 
-if GROQ_API_KEY:
-    groq_client = Groq(api_key=GROQ_API_KEY)
-else:
-    groq_client = None
+groq_client = Groq(
+    api_key=GROQ_API_KEY
+)
 
 
-# ==========================================
+# =========================================================
 # CONVERSATION MEMORY
-# ==========================================
+# =========================================================
 
 conversation_history = []
 
 
 def get_recent_history(limit=6):
     """
-    Return the most recent conversation messages.
+    Return the most recent user messages.
 
-    limit:
-        Maximum number of messages to remember.
+    This allows the AI to understand follow-up requests
+    such as:
+
+    "Show me 5 Webflow jobs"
+    "Only remote ones"
+    "Not from Upwork"
     """
 
     return conversation_history[-limit:]
 
 
-# ==========================================
+
+# =========================================================
 # PARSE USER REQUEST
-# ==========================================
+# =========================================================
 
 def parse_user_request(user_request):
-    """
-    Understand the user's natural-language job search request
-    and convert it into structured search requirements.
-
-    The AI also uses recent conversation history so that
-    follow-up requests can refer to previous searches.
-    """
-
-    if not groq_client:
-        print("\nERROR: GROQ_API_KEY was not found in .env")
-        return None
-
-    # --------------------------------------
-    # GET RECENT CONVERSATION
-    # --------------------------------------
 
     recent_history = get_recent_history()
 
-    history_text = ""
 
-    if recent_history:
+    history_text = "\n".join(
+        f"- {message}"
+        for message in recent_history
+    )
 
-        history_text = "\n".join(
-            [
-                f"{message['role']}: {message['content']}"
-                for message in recent_history
-            ]
-        )
-
-    # --------------------------------------
-    # BUILD AI PROMPT
-    # --------------------------------------
 
     prompt = f"""
-You are a job search request parser.
+You are an AI job search request parser.
 
-Here is the recent conversation history:
+Convert the user's request into structured JSON.
+
+The user may ask for:
+- quantity
+- technology/stack
+- posting date
+- location
+- remote/full-time/part-time/contract
+- excluded job sources
+- follow-up modifications
+
+IMPORTANT:
+If the current request is a follow-up, use the recent conversation
+history to preserve previous requirements.
+
+
+Return ONLY valid JSON.
+
+
+Required JSON structure:
+
+{{
+    "quantity": number,
+    "stack": string or null,
+    "posted_within_days": number or null,
+    "location": string or null,
+    "employment_type": string or null,
+    "excluded_sources": []
+}}
+
+
+Recent conversation:
 
 {history_text}
 
-The user's latest message is:
 
-"{user_request}"
+Current user request:
 
-Your job is to understand the user's latest
-job search request using the previous conversation
-when necessary.
-
-IMPORTANT:
-
-The latest message may be a follow-up request.
-
-If the latest message depends on the previous request,
-preserve the relevant information from the previous request.
-
-Examples:
-
-Previous:
-"Show me 5 Webflow jobs"
-
-Latest:
-"Only remote ones"
-
-Then understand it as:
-
-5 Webflow jobs
-employment_type = remote
-
-Another example:
-
-Previous:
-"Show me Webflow jobs"
-
-Latest:
-"Not from Upwork"
-
-Then understand it as:
-
-Webflow jobs
-excluded_sources = ["Upwork"]
-
-Another example:
-
-Previous:
-"Show me 5 Webflow jobs posted within 3 days"
-
-Latest:
-"Only Europe"
-
-Then preserve:
-
-quantity = 5
-stack = Webflow
-posted_within_days = 3
-
-and add:
-
-location = Europe
-
-If the latest message contains a completely new
-job search, use the latest request instead of
-incorrectly carrying over unrelated information.
-
-Extract the following information:
-
-1. quantity
-
-- Number of jobs the user wants.
-- If the user does not specify a number,
-  use 5.
-- Must be a number.
-
-2. stack
-
-- The main technology, platform, skill,
-  or job type the user is looking for.
-
-Examples:
-
-Webflow
-Kajabi
-n8n
-React
-Python
-AI automation
-WordPress
-
-3. posted_within_days
-
-- If the user asks for jobs posted within
-  a certain number of days, return that number.
-
-Examples:
-
-"posted within 3 days" → 3
-"last 24 hours" → 1
-"posted today" → 1
-
-- If no date restriction is mentioned,
-  return null.
-
-4. location
-
-- If the user specifies a location, return it.
-
-Examples:
-
-"Webflow jobs in Europe" → "Europe"
-"Webflow jobs from USA" → "USA"
-"remote Webflow jobs" → null
-
-- If no location is specified, return null.
-
-5. employment_type
-
-If the user specifies:
-
-remote
-contract
-full-time
-part-time
-
-return the appropriate value.
-
-Otherwise return null.
-
-Important:
-
-"remote" should be treated as an employment/location
-requirement because the job needs to allow remote work.
-
-6. excluded_sources
-
-Extract any job platforms, companies, or sources
-the user explicitly wants to exclude.
-
-Examples:
-
-"not from Upwork" → ["Upwork"]
-
-"exclude Fiverr" → ["Fiverr"]
-
-"not from Upwork or Fiverr"
-→ ["Upwork", "Fiverr"]
-
-If none are mentioned:
-
-[]
-
-IMPORTANT:
-
-- Do not invent information.
-- Use previous conversation only when needed
-  to understand the latest request.
-- Preserve previous search requirements when
-  the user is clearly modifying the previous search.
-- If a new search is clearly started, do not
-  carry over unrelated old requirements.
-- quantity must be a number.
-- posted_within_days must be a number or null.
-- excluded_sources must always be an array.
-- Return ONLY valid JSON.
-
-Use exactly this format:
-
-{{
-    "quantity": 5,
-    "stack": "Webflow",
-    "posted_within_days": 3,
-    "location": null,
-    "employment_type": null,
-    "excluded_sources": ["Upwork"]
-}}
+{user_request}
 """
 
-    # --------------------------------------
-    # CALL GROQ
-    # --------------------------------------
 
     try:
 
         response = groq_client.chat.completions.create(
+
             model="openai/gpt-oss-120b",
+
             messages=[
                 {
                     "role": "user",
                     "content": prompt
                 }
             ],
-            response_format={
-                "type": "json_object"
-            },
+
             temperature=0
         )
 
-        content = response.choices[0].message.content
 
-        result = json.loads(content)
+        content = response.choices[0].message.content.strip()
 
-        return result
 
-    except json.JSONDecodeError:
+        if content.startswith("```"):
 
-        print("\nERROR: Groq returned invalid JSON.")
-        return None
+            content = content.replace(
+                "```json",
+                ""
+            )
+
+            content = content.replace(
+                "```",
+                ""
+            )
+
+            content = content.strip()
+
+
+        return json.loads(content)
+
 
     except Exception as error:
 
-        print("\nERROR: Could not understand the job request.")
-        print(f"Details: {error}")
+        print(
+            "\nERROR: Could not parse user request."
+        )
 
-        return None
+        print(
+            f"Details: {error}"
+        )
 
 
-# ==========================================
-# FILTER JOBS BY POSTED DATE
-# ==========================================
+        return {
+
+            "quantity": 5,
+
+            "stack": user_request,
+
+            "posted_within_days": None,
+
+            "location": None,
+
+            "employment_type": None,
+
+            "excluded_sources": []
+
+        }
+
+
+
+# =========================================================
+# DISPLAY SEARCH REQUIREMENTS
+# =========================================================
+
+def display_search_requirements(requirements):
+
+    print(
+        "\n================ SEARCH REQUIREMENTS ================\n"
+    )
+
+
+    print(
+        f"Quantity: {requirements.get('quantity')}"
+    )
+
+
+    print(
+        f"Stack: {requirements.get('stack')}"
+    )
+
+
+    print(
+        f"Posted within days: {requirements.get('posted_within_days')}"
+    )
+
+
+    print(
+        f"Location: {requirements.get('location')}"
+    )
+
+
+    print(
+        f"Employment type: {requirements.get('employment_type')}"
+    )
+
+
+    print(
+        f"Excluded sources: {requirements.get('excluded_sources')}"
+    )
+
+
+    print(
+        "\n======================================================\n"
+    )
+
+
+
+# =========================================================
+# BUILD JSEARCH QUERY
+# =========================================================
+
+def build_search_query(requirements):
+
+    stack = requirements.get("stack")
+
+    location = requirements.get("location")
+
+    employment_type = requirements.get(
+        "employment_type"
+    )
+
+
+    query_parts = []
+
+
+    if stack:
+
+        query_parts.append(
+            stack
+        )
+
+
+    query_parts.append(
+        "jobs"
+    )
+
+
+    if location:
+
+        query_parts.append(
+            f"in {location}"
+        )
+
+
+    if employment_type:
+
+        employment_lower = employment_type.lower()
+
+
+        if employment_lower == "remote":
+
+            query_parts.append(
+                "remote"
+            )
+
+
+        elif employment_lower == "full-time":
+
+            query_parts.append(
+                "full time"
+            )
+
+
+        elif employment_lower == "part-time":
+
+            query_parts.append(
+                "part time"
+            )
+
+
+        elif employment_lower == "contract":
+
+            query_parts.append(
+                "contract"
+            )
+
+
+    return " ".join(query_parts)
+
+
+
+# =========================================================
+# SEARCH JOBS - JSEARCH
+# =========================================================
+
+def search_jobs(query, num_pages=1):
+
+    """
+    Search jobs using the current JSearch API.
+
+    Current endpoint:
+    https://jsearch.p.rapidapi.com/search-v2
+    """
+
+
+    API_URL = (
+        "https://jsearch.p.rapidapi.com/search-v2"
+    )
+
+
+    API_HOST = (
+        "jsearch.p.rapidapi.com"
+    )
+
+
+    headers = {
+
+        "x-rapidapi-key": RAPIDAPI_KEY,
+
+        "x-rapidapi-host": API_HOST
+
+    }
+
+
+    params = {
+
+        "query": query,
+
+        "num_pages": str(num_pages),
+
+        "country": "us",
+
+        "date_posted": "all"
+
+    }
+
+
+    response = None
+
+
+    try:
+
+
+        response = requests.get(
+
+            API_URL,
+
+            headers=headers,
+
+            params=params,
+
+            timeout=60
+
+        )
+
+
+        # Debug information
+
+        print(
+            "\nJSearch Status:",
+            response.status_code
+        )
+
+
+        print(
+            "JSearch URL:",
+            response.url
+        )
+
+
+        response.raise_for_status()
+
+
+        data = response.json()
+
+
+        jobs = data.get(
+
+            "data",
+
+            {}
+
+        ).get(
+
+            "jobs",
+
+            []
+
+        )
+
+
+        print(
+            f"JSearch returned {len(jobs)} jobs."
+        )
+
+
+        return jobs
+
+
+    except requests.exceptions.RequestException as error:
+
+
+        print(
+            "\nERROR: JSearch request failed."
+        )
+
+
+        print(
+            f"Details: {error}"
+        )
+
+
+        if response is not None:
+
+            print(
+                "API Response:",
+                response.text[:2000]
+            )
+
+
+        return []
+
+# =========================================================
+# FILTER JOBS BY DATE
+# =========================================================
 
 def filter_jobs_by_date(jobs, max_days):
+
     """
-    Keep only jobs that were posted within
-    the requested number of days.
+    Keep only jobs posted within the requested number of days.
+
+    Example:
+
+    max_days = 3
+
+    Keeps:
+    - 1 day ago
+    - 2 days ago
+    - 3 days ago
+    - today
+    - recent hours
+
+    This is a simple learning implementation.
     """
 
+
     if not max_days:
+
         return jobs
+
 
     filtered_jobs = []
 
+
     for job in jobs:
+
 
         posted_text = job.get(
             "job_posted_at",
             ""
         ).lower()
 
-        # ----------------------------------
-        # Hours
-        # Example: "16 hours ago"
-        # ----------------------------------
 
         if "hour" in posted_text:
 
             filtered_jobs.append(job)
+
             continue
 
-        # ----------------------------------
-        # Today
-        # ----------------------------------
+
 
         if "today" in posted_text:
 
             filtered_jobs.append(job)
+
             continue
 
-        # ----------------------------------
-        # Days
-        # Example: "2 days ago"
-        # ----------------------------------
+
 
         if "day" in posted_text:
+
 
             try:
 
@@ -365,748 +496,1185 @@ def filter_jobs_by_date(jobs, max_days):
                     posted_text.split()[0]
                 )
 
+
                 if days <= max_days:
 
                     filtered_jobs.append(job)
+
 
             except (ValueError, IndexError):
 
                 continue
 
+
     return filtered_jobs
 
 
-# ==========================================
-# FILTER JOBS BY SOURCE
-# ==========================================
 
-def filter_jobs_by_source(jobs, excluded_sources):
+
+# =========================================================
+# FILTER JOBS BY SOURCE
+# =========================================================
+
+def filter_jobs_by_source(
+    jobs,
+    excluded_sources
+):
+
     """
-    Remove jobs from sources the user wants to exclude.
+    Remove jobs from excluded sources.
+
+    Example:
+
+    excluded_sources = ["Upwork"]
+
+    Jobs published by Upwork will be removed.
     """
+
 
     if not excluded_sources:
+
         return jobs
+
 
     filtered_jobs = []
 
+
     excluded_sources_lower = [
+
         source.lower()
+
         for source in excluded_sources
+
     ]
 
+
     for job in jobs:
+
 
         publisher = job.get(
             "job_publisher",
             ""
         ).lower()
+
 
         employer = job.get(
             "employer_name",
             ""
         ).lower()
 
-        # Check both publisher and employer
+
+
         should_exclude = any(
+
             source in publisher
+
             or source in employer
+
             for source in excluded_sources_lower
+
         )
+
 
         if not should_exclude:
 
             filtered_jobs.append(job)
 
+
     return filtered_jobs
 
 
-# ==========================================
-# SEARCH JOBS
-# ==========================================
-
-def search_jobs(query, num_pages=1):
-    """
-    Search for jobs using JSearch Mega API.
-    """
-
-    if not RAPIDAPI_KEY:
-        print(
-            "\nERROR: RAPIDAPI_KEY was not found in .env"
-        )
-        return []
-
-    headers = {
-        "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": API_HOST
-    }
-
-    params = {
-        "query": query,
-        "page": "1",
-        "num_pages": str(num_pages)
-    }
-
-    try:
-
-        response = requests.get(
-            API_URL,
-            headers=headers,
-            params=params,
-            timeout=20
-        )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        return data.get("data", [])
-
-    except requests.exceptions.Timeout:
-
-        print(
-            "\nERROR: The API request timed out."
-        )
-        return []
-
-    except requests.exceptions.HTTPError as error:
-
-        print(
-            "\nERROR: JSearch API returned an HTTP error."
-        )
-
-        if response.status_code == 401:
-
-            print(
-                "Your RapidAPI key may be invalid."
-            )
-
-        elif response.status_code == 403:
-
-            print(
-                "Your RapidAPI subscription may not "
-                "allow this request."
-            )
-
-        elif response.status_code == 429:
-
-            print(
-                "You have reached your API request limit."
-            )
-
-        else:
-
-            print(
-                f"Status code: {response.status_code}"
-            )
-
-        print(
-            f"Details: {error}"
-        )
-
-        return []
-
-    except requests.exceptions.RequestException as error:
-
-        print(
-            "\nERROR: Could not connect to JSearch."
-        )
-
-        print(
-            f"Details: {error}"
-        )
-
-        return []
-
-    except ValueError:
-
-        print(
-            "\nERROR: API returned invalid JSON."
-        )
-
-        return []
 
 
-# ==========================================
-# ANALYZE ONE JOB WITH GROQ
-# ==========================================
+
+# =========================================================
+# AI JOB ANALYSIS
+# =========================================================
 
 def analyze_job(job, search_query):
-    """
-    Analyze one job using Groq.
 
-    Returns:
-        Dictionary containing requirements,
-        relevance score and reason.
+    """
+    Use AI to analyze whether a job is actually relevant
+    to the requested technology/stack.
     """
 
-    if not groq_client:
-
-        print(
-            "\nERROR: GROQ_API_KEY was not found in .env"
-        )
-
-        return None
 
     title = job.get(
         "job_title",
         ""
     )
 
+
+    company = job.get(
+        "employer_name",
+        ""
+    )
+
+
     description = job.get(
         "job_description",
         ""
     )
 
-    if not description:
 
-        return None
 
     prompt = f"""
+
 You are an AI job relevance analyzer.
 
-The user is searching for:
+Analyze this job against the user's search query.
 
-"{search_query}"
+User search:
 
-Analyze the following job.
+{search_query}
 
-JOB TITLE:
+
+Job title:
+
 {title}
 
-JOB DESCRIPTION:
+
+Company:
+
+{company}
+
+
+Job description:
+
 {description}
 
-Your tasks:
 
-1. Extract the actual technical skills,
-   tools, technologies and professional
-   requirements from the job.
 
-2. Determine how relevant this job is
-   to the user's search query.
-
-3. Give a relevance score from 0 to 100.
-
-Scoring guidance:
-
-90-100:
-Directly matches the requested job/skill.
-
-70-89:
-Strongly related and likely relevant.
-
-40-69:
-Some relevant aspects but not primarily
-the requested job.
-
-1-39:
-Very little relevance.
-
-0:
-Not relevant.
-
-IMPORTANT:
-
-- Do not invent requirements.
-- Only use information explicitly present
-  in the job description.
-- Do not treat salary, location, portfolio
-  requests, availability or application
-  instructions as skills.
-- Keep requirements concise.
-- The relevance score must reflect the
-  actual job content, not just keywords.
-- If the search term is the name of a company
-  rather than the technology/platform, do not
-  assume the job is relevant to the technology.
-
-Return ONLY valid JSON in this exact format:
+Return ONLY valid JSON in this format:
 
 {{
-    "requirements": [
-        "requirement 1",
-        "requirement 2"
-    ],
-    "relevance_score": 95,
-    "reason": "Short explanation of why this job is relevant."
+    "requirements": [],
+    "relevance_score": 0,
+    "reason": ""
 }}
+
+
+Rules:
+
+1. Extract actual technical skills, tools,
+technologies and professional requirements.
+
+2. Do not invent requirements.
+
+3. Ignore salary, location, availability,
+portfolio requirements and generic soft skills.
+
+4. Score relevance from 0 to 100.
+
 """
+
 
     try:
 
+
         response = groq_client.chat.completions.create(
+
             model="openai/gpt-oss-120b",
+
             messages=[
+
                 {
+
                     "role": "user",
+
                     "content": prompt
+
                 }
+
             ],
-            response_format={
-                "type": "json_object"
-            },
+
             temperature=0
+
         )
 
-        content = response.choices[0].message.content
+
+
+        content = response.choices[0].message.content.strip()
+
+
+
+        if content.startswith("```"):
+
+            content = content.replace(
+                "```json",
+                ""
+            )
+
+            content = content.replace(
+                "```",
+                ""
+            )
+
+            content = content.strip()
+
+
 
         return json.loads(content)
 
-    except json.JSONDecodeError:
 
-        print(
-            "\nERROR: Groq returned invalid JSON."
-        )
-
-        return None
 
     except Exception as error:
 
+
         print(
-            "\nERROR: AI analysis failed."
+            "\nERROR: Could not analyze job."
+        )
+
+
+        print(
+            f"Details: {error}"
+        )
+
+
+        return {
+
+            "requirements": [],
+
+            "relevance_score": 0,
+
+            "reason": "AI analysis failed."
+
+        }
+
+
+
+
+
+
+# =========================================================
+# ANALYZE ALL JOBS
+# =========================================================
+
+def analyze_jobs(jobs, search_query):
+
+
+    analyzed_jobs = []
+
+
+    print(
+        f"\nAnalyzing {len(jobs)} jobs with AI...\n"
+    )
+
+
+    for index, job in enumerate(
+
+        jobs,
+
+        start=1
+
+    ):
+
+
+        title = job.get(
+
+            "job_title",
+
+            "Unknown title"
+
+        )
+
+
+        print(
+
+            f"Analyzing {index}/{len(jobs)}: {title}"
+
+        )
+
+
+        analysis = analyze_job(
+
+            job,
+
+            search_query
+
+        )
+
+
+        analyzed_jobs.append(
+
+            {
+
+                "job": job,
+
+                "analysis": analysis
+
+            }
+
+        )
+
+
+    return analyzed_jobs
+
+
+
+
+
+# =========================================================
+# DISPLAY JOBS IN TERMINAL
+# =========================================================
+
+def display_jobs(analyzed_jobs):
+
+
+    if not analyzed_jobs:
+
+
+        print(
+
+            "\nNo relevant jobs found."
+
+        )
+
+        return
+
+
+
+    print(
+
+        "\n================ JOB RESULTS ================\n"
+
+    )
+
+
+
+    for index, item in enumerate(
+
+        analyzed_jobs,
+
+        start=1
+
+    ):
+
+
+
+        job = item["job"]
+
+        analysis = item["analysis"]
+
+
+
+        print(
+
+            f"{index}. {job.get('job_title','Unknown title')}"
+
+        )
+
+
+        print(
+
+            f"Company: {job.get('employer_name','Unknown company')}"
+
+        )
+
+
+        print(
+
+            f"Location: {job.get('job_location','Unknown location')}"
+
+        )
+
+
+        print(
+
+            f"Source: {job.get('job_publisher','Unknown')}"
+
+        )
+
+
+        print(
+
+            f"Relevance: {analysis.get('relevance_score',0)}/100"
+
+        )
+
+
+        print(
+
+            f"Why: {analysis.get('reason','')}"
+
+        )
+
+
+        print(
+
+            f"Apply: {job.get('job_apply_link','')}"
+
+        )
+
+
+        print(
+
+            "\n---------------------------------------------\n"
+
+        )
+
+
+
+
+
+
+# =========================================================
+# FORMAT JOBS FOR TELEGRAM
+# =========================================================
+
+def format_jobs_for_telegram(analyzed_jobs):
+
+
+    if not analyzed_jobs:
+
+        return "No jobs found."
+
+
+
+    message = (
+
+        "🔎 AI Job Finder Results\n\n"
+
+    )
+
+
+    for index, item in enumerate(
+
+        analyzed_jobs,
+
+        start=1
+
+    ):
+
+
+        job = item["job"]
+
+        analysis = item["analysis"]
+
+
+
+        message += (
+
+            f"{index}. {job.get('job_title')}\n"
+
+            f"🏢 Company: {job.get('employer_name')}\n"
+
+            f"📍 Location: {job.get('job_location')}\n"
+
+            f"🌐 Source: {job.get('job_publisher')}\n"
+
+            f"⭐ Relevance: {analysis.get('relevance_score',0)}/100\n\n"
+
+            f"💡 Why: {analysis.get('reason','')}\n\n"
+
+            f"🔗 Apply: {job.get('job_apply_link')}\n"
+
+            "\n------------------------\n\n"
+
+        )
+
+
+    return message
+
+
+
+
+
+# =========================================================
+# SEND MESSAGE TO TELEGRAM
+# =========================================================
+
+def send_telegram_message(message):
+
+
+    if not TELEGRAM_BOT_TOKEN:
+
+        print(
+            "\nERROR: TELEGRAM_BOT_TOKEN is missing."
+        )
+
+        return
+
+
+
+    if not TELEGRAM_CHAT_ID:
+
+        print(
+            "\nERROR: TELEGRAM_CHAT_ID is missing."
+        )
+
+        return
+
+
+
+    url = (
+
+        f"https://api.telegram.org/"
+
+        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+    )
+
+
+
+    payload = {
+
+        "chat_id": TELEGRAM_CHAT_ID,
+
+        "text": message
+
+    }
+
+
+
+    try:
+
+
+        response = requests.post(
+
+            url,
+
+            json=payload,
+
+            timeout=10
+
+        )
+
+        print(response.text)
+
+        response.raise_for_status()
+
+
+
+        print(
+
+            "\nTelegram message sent successfully!"
+
+        )
+
+
+
+    except requests.exceptions.RequestException as error:
+
+
+        print(
+
+            "\nERROR: Could not send Telegram message."
+
+        )
+
+
+        print(
+
+            f"Details: {error}"
+
+        )
+
+
+
+# =========================================================
+# REMOVE WEBHOOK
+# =========================================================
+
+def remove_telegram_webhook():
+    """
+    Remove any existing Telegram webhook.
+
+    getUpdates polling cannot work while a webhook is active.
+    """
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/deleteWebhook"
+    )
+
+    try:
+
+        response = requests.post(
+            url,
+            json={
+                "drop_pending_updates": False
+            },
+            timeout=10
+        )
+
+        response.raise_for_status()
+
+        print(
+            "Telegram webhook removed."
+        )
+
+    except requests.exceptions.RequestException as error:
+
+        print(
+            "\nERROR: Could not remove Telegram webhook."
         )
 
         print(
             f"Details: {error}"
         )
 
-        return None
 
+# =========================================================
+# GET TELEGRAM UPDATES
+# =========================================================
 
-# ==========================================
-# DISPLAY SEARCH REQUIREMENTS
-# ==========================================
-
-def display_search_requirements(requirements):
+def get_telegram_updates(offset=None):
     """
-    Display the structured requirements extracted
-    from the user's natural-language request.
+    Get new messages from Telegram using long polling.
     """
 
-    print("\n==============================")
-    print("     SEARCH REQUIREMENTS")
-    print("==============================")
-
-    print(
-        f"Quantity: "
-        f"{requirements.get('quantity', 5)}"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/getUpdates"
     )
 
-    print(
-        f"Stack: "
-        f"{requirements.get('stack')}"
-    )
+    params = {
+        "timeout": 30,
+        "limit": 10,
+        "allowed_updates": ["message"]
+    }
 
-    print(
-        f"Posted within days: "
-        f"{requirements.get('posted_within_days')}"
-    )
+    if offset is not None:
+        params["offset"] = offset
 
-    print(
-        f"Location: "
-        f"{requirements.get('location')}"
-    )
+    try:
 
-    print(
-        f"Employment type: "
-        f"{requirements.get('employment_type')}"
-    )
-
-    print(
-        f"Excluded sources: "
-        f"{requirements.get('excluded_sources', [])}"
-    )
-
-
-# ==========================================
-# DISPLAY ANALYZED JOBS
-# ==========================================
-
-def display_jobs(analyzed_jobs):
-    """
-    Display analyzed jobs in a clean format.
-    """
-
-    if not analyzed_jobs:
-
-        print(
-            "\nNo analyzed jobs available."
+        response = requests.get(
+            url,
+            params=params,
+            timeout=40
         )
 
-        return
+        response.raise_for_status()
 
-    print("\n")
-    print("==============================")
-    print("       ANALYZED JOBS")
-    print("==============================")
+        data = response.json()
 
-    for index, item in enumerate(
-        analyzed_jobs,
-        start=1
-    ):
+        if not data.get("ok"):
+            print(
+                "\nTelegram API error:",
+                data
+            )
 
-        job = item["job"]
-        analysis = item["analysis"]
+            return []
 
-        title = job.get(
-            "job_title",
-            "Unknown title"
-        )
-
-        company = job.get(
-            "employer_name",
-            "Unknown company"
-        )
-
-        location = job.get(
-            "job_location",
-            "Unknown location"
-        )
-
-        publisher = job.get(
-            "job_publisher",
-            "Unknown"
-        )
-
-        apply_link = job.get(
-            "job_apply_link",
-            "No apply link"
-        )
-
-        posted_at = job.get(
-            "job_posted_at",
-            "Unknown"
-        )
-
-        score = analysis.get(
-            "relevance_score",
-            0
-        )
-
-        requirements = analysis.get(
-            "requirements",
+        return data.get(
+            "result",
             []
         )
 
-        reason = analysis.get(
-            "reason",
-            ""
+    except requests.exceptions.RequestException as error:
+
+        print(
+            "\nERROR: Could not get Telegram updates."
         )
 
         print(
-            "\n------------------------------"
+            f"Details: {error}"
         )
 
-        print(
-            f"{index}. {title}"
+        return []
+
+# =========================================================
+# PROCESS TELEGRAM MESSAGE
+# =========================================================
+
+def process_telegram_message(message_text):
+    """
+    Process a user's Telegram job-search request.
+    """
+
+    print(
+        "\n========================================"
+    )
+
+    print(
+        "New Telegram message:"
+    )
+
+    print(
+        message_text
+    )
+
+    print(
+        "========================================\n"
+    )
+
+    # Save message to conversation memory
+    conversation_history.append(
+        message_text
+    )
+
+    # ---------------------------------------------
+    # PARSE USER REQUEST
+    # ---------------------------------------------
+
+    requirements = parse_user_request(
+        message_text
+    )
+
+    display_search_requirements(
+        requirements
+    )
+
+    # ---------------------------------------------
+    # BUILD SEARCH QUERY
+    # ---------------------------------------------
+
+    search_query = build_search_query(
+        requirements
+    )
+
+    print(
+        f"JSearch query: {search_query}"
+    )
+
+    # ---------------------------------------------
+    # SEARCH JOBS
+    # ---------------------------------------------
+
+    jobs = search_jobs(
+        search_query,
+        num_pages=1
+    )
+
+    if not jobs:
+
+        return "❌ No jobs found."
+
+    # ---------------------------------------------
+    # DATE FILTER
+    # ---------------------------------------------
+
+    jobs = filter_jobs_by_date(
+        jobs,
+        requirements.get(
+            "posted_within_days"
+        )
+    )
+
+    print(
+        f"After date filter: {len(jobs)} jobs"
+    )
+
+    # ---------------------------------------------
+    # SOURCE FILTER
+    # ---------------------------------------------
+
+    jobs = filter_jobs_by_source(
+        jobs,
+        requirements.get(
+            "excluded_sources",
+            []
+        )
+    )
+
+    print(
+        f"After source filter: {len(jobs)} jobs"
+    )
+
+    if not jobs:
+
+        return (
+            "❌ No jobs matched your filters."
         )
 
-        print(
-            f"Company: {company}"
+    # ---------------------------------------------
+    # AI ANALYSIS
+    # ---------------------------------------------
+
+    analyzed_jobs = analyze_jobs(
+        jobs,
+        search_query
+    )
+
+    # ---------------------------------------------
+    # SORT BY RELEVANCE
+    # ---------------------------------------------
+
+    analyzed_jobs.sort(
+        key=lambda item: item["analysis"].get(
+            "relevance_score",
+            0
+        ),
+        reverse=True
+    )
+
+    # ---------------------------------------------
+    # TOP N
+    # ---------------------------------------------
+
+    quantity = requirements.get(
+        "quantity",
+        5
+    )
+
+    top_jobs = analyzed_jobs[
+        :quantity
+    ]
+
+    # ---------------------------------------------
+    # FORMAT TELEGRAM MESSAGE
+    # ---------------------------------------------
+
+    telegram_message = (
+        format_jobs_for_telegram(
+            top_jobs
         )
+    )
 
-        print(
-            f"Location: {location}"
-        )
-
-        print(
-            f"Posted: {posted_at}"
-        )
-
-        print(
-            f"Source: {publisher}"
-        )
-
-        print(
-            f"\nRelevance Score: {score}%"
-        )
-
-        print("\nRequirements:")
-
-        for requirement in requirements:
-
-            print(
-                f"- {requirement}"
-            )
-
-        print(
-            f"\nWhy: {reason}"
-        )
-
-        print(
-            f"\nApply: {apply_link}"
-        )
+    return telegram_message
 
 
-# ==========================================
+# =========================================================
 # MAIN PROGRAM
-# ==========================================
+# =========================================================
 
 def main():
 
-    print("==============================")
-    print("        AI JOB FINDER")
-    print("==============================")
 
-    # --------------------------------------
-    # CONTINUOUS CONVERSATION LOOP
-    # --------------------------------------
+    print(
+
+        "\n========================================"
+
+    )
+
+    print(
+
+        "        AI JOB FINDER"
+
+    )
+
+    print(
+
+        "========================================\n"
+
+    )
+
+
 
     while True:
 
-        # ----------------------------------
-        # GET NATURAL LANGUAGE REQUEST
-        # ----------------------------------
 
         user_request = input(
-            "\nWhat jobs are you looking for?\n"
-        )
 
-        # ----------------------------------
-        # EXIT COMMAND
-        # ----------------------------------
+            "What jobs are you looking for? "
 
-        if user_request.lower().strip() in [
+        ).strip()
+
+
+
+        if user_request.lower() in [
+
             "exit",
+
             "quit",
+
             "bye"
+
         ]:
 
+
             print(
+
                 "\nGoodbye!"
+
             )
 
             break
 
-        # ----------------------------------
-        # EMPTY REQUEST
-        # ----------------------------------
 
-        if not user_request.strip():
 
-            print(
-                "\nJob request cannot be empty!"
-            )
+        if not user_request:
 
             continue
 
-        # ----------------------------------
-        # SAVE USER MESSAGE TO MEMORY
-        # ----------------------------------
+
 
         conversation_history.append(
-            {
-                "role": "user",
-                "content": user_request
-            }
-        )
 
-        # ----------------------------------
-        # UNDERSTAND USER REQUEST
-        # ----------------------------------
-
-        print(
-            "\nUnderstanding your request..."
-        )
-
-        search_requirements = parse_user_request(
             user_request
+
         )
 
-        if not search_requirements:
 
-            continue
 
-        # ----------------------------------
-        # SHOW WHAT AI UNDERSTOOD
-        # ----------------------------------
+        requirements = parse_user_request(
+
+            user_request
+
+        )
+
+
 
         display_search_requirements(
-            search_requirements
+
+            requirements
+
         )
 
-        # ----------------------------------
-        # GET SEARCH STACK
-        # ----------------------------------
 
-        stack = search_requirements.get(
-            "stack"
+
+        search_query = build_search_query(
+
+            requirements
+
         )
 
-        if not stack:
-
-            print(
-                "\nERROR: Could not determine "
-                "what type of job to search for."
-            )
-
-            continue
-
-        # ----------------------------------
-        # SEARCH JSEARCH
-        # ----------------------------------
 
         print(
-            f"\nSearching JSearch for: {stack}"
+
+            f"JSearch query: {search_query}"
+
         )
 
+
+
         jobs = search_jobs(
-            stack
+
+            search_query,
+
+            num_pages=1
+
         )
+
+
 
         if not jobs:
 
+
             print(
-                "\nNo jobs found."
+
+                "\nNo jobs returned from JSearch."
+
             )
 
             continue
 
-        print(
-            f"\nFound {len(jobs)} jobs from JSearch."
-        )
 
-        # ----------------------------------
-        # FILTER BY POSTED DATE
-        # ----------------------------------
 
-        posted_within_days = (
-            search_requirements.get(
-                "posted_within_days"
-            )
-        )
+        jobs = filter_jobs_by_date(
 
-        if posted_within_days:
-
-            jobs = filter_jobs_by_date(
-                jobs,
-                posted_within_days
-            )
-
-            print(
-                f"Found {len(jobs)} jobs "
-                f"posted within the last "
-                f"{posted_within_days} days."
-            )
-
-            if not jobs:
-
-                print(
-                    f"\nNo jobs found within the "
-                    f"last {posted_within_days} days."
-                )
-
-                continue
-
-        # ----------------------------------
-        # FILTER BY EXCLUDED SOURCES
-        # ----------------------------------
-
-        excluded_sources = (
-            search_requirements.get(
-                "excluded_sources",
-                []
-            )
-        )
-
-        if excluded_sources:
-
-            jobs = filter_jobs_by_source(
-                jobs,
-                excluded_sources
-            )
-
-            print(
-                f"Found {len(jobs)} jobs "
-                f"after excluding: "
-                f"{', '.join(excluded_sources)}."
-            )
-
-            if not jobs:
-
-                print(
-                    "\nNo jobs found after applying "
-                    "source exclusions."
-                )
-
-                continue
-
-        # ----------------------------------
-        # ANALYZE JOBS WITH AI
-        # ----------------------------------
-
-        print(
-            "\nAnalyzing jobs with AI..."
-        )
-
-        analyzed_jobs = []
-
-        for index, job in enumerate(
             jobs,
-            start=1
-        ):
 
-            print(
-                f"Analyzing job "
-                f"{index}/{len(jobs)}..."
+            requirements.get(
+
+                "posted_within_days"
+
             )
 
-            analysis = analyze_job(
-                job,
-                stack
+        )
+
+
+
+        print(
+
+            f"After date filter: {len(jobs)} jobs"
+
+        )
+
+
+
+        jobs = filter_jobs_by_source(
+
+            jobs,
+
+            requirements.get(
+
+                "excluded_sources",
+
+                []
+
             )
 
-            if analysis:
+        )
 
-                analyzed_jobs.append(
-                    {
-                        "job": job,
-                        "analysis": analysis
-                    }
-                )
 
-        # ----------------------------------
-        # SORT BY RELEVANCE SCORE
-        # ----------------------------------
+
+        print(
+
+            f"After source filter: {len(jobs)} jobs"
+
+        )
+
+
+
+        analyzed_jobs = analyze_jobs(
+
+            jobs,
+
+            search_query
+
+        )
+
+
 
         analyzed_jobs.sort(
-            key=lambda item: item["analysis"].get(
+
+            key=lambda item:
+
+            item["analysis"].get(
+
                 "relevance_score",
+
                 0
+
             ),
+
             reverse=True
+
         )
 
-        # ----------------------------------
-        # GET REQUESTED NUMBER OF JOBS
-        # ----------------------------------
 
-        quantity = search_requirements.get(
+
+        quantity = requirements.get(
+
             "quantity",
+
             5
+
         )
+
+
 
         top_jobs = analyzed_jobs[:quantity]
 
-        # ----------------------------------
-        # DISPLAY TOP JOBS
-        # ----------------------------------
 
-        print(
-            f"\nShowing top {len(top_jobs)} "
-            f"jobs based on relevance."
-        )
 
         display_jobs(
+
             top_jobs
+
         )
 
 
-# ==========================================
-# PROGRAM ENTRY POINT
-# ==========================================
+
+        telegram_message = format_jobs_for_telegram(
+
+            top_jobs
+
+        )
+
+
+        send_telegram_message(
+
+            telegram_message
+
+        )
+
+# =========================================================
+# TELEGRAM BOT LOOP
+# =========================================================
+
+def telegram_bot_loop():
+    """
+    Continuously listen for Telegram messages.
+    """
+
+    print(
+        "\n========================================"
+    )
+
+    print(
+        "        AI JOB FINDER BOT"
+    )
+
+    print(
+        "========================================\n"
+    )
+
+    print(
+        "Telegram bot is running..."
+    )
+
+    print(
+        "Waiting for messages...\n"
+    )
+
+    # Remove webhook before starting polling
+    remove_telegram_webhook()
+
+    offset = None
+
+    while True:
+
+        updates = get_telegram_updates(
+            offset
+        )
+
+        for update in updates:
+
+            # Confirm this update
+            offset = (
+                update["update_id"] + 1
+            )
+
+            # Get message
+            message = update.get(
+                "message"
+            )
+
+            if not message:
+                continue
+
+            # Get text
+            message_text = message.get(
+                "text"
+            )
+
+            if not message_text:
+                continue
+
+            # Get chat ID
+            chat_id = message["chat"]["id"]
+
+            print(
+                f"Message from chat: {chat_id}"
+            )
+
+            # -----------------------------------------
+            # PROCESS USER REQUEST
+            # -----------------------------------------
+
+            try:
+
+                result = process_telegram_message(
+                    message_text
+                )
+
+            except Exception as error:
+
+                print(
+                    "\nERROR while processing message:"
+                )
+
+                print(
+                    error
+                )
+
+                result = (
+                    "❌ Sorry, something went wrong "
+                    "while searching for jobs."
+                )
+
+            # -----------------------------------------
+            # SEND RESULT
+            # -----------------------------------------
+
+            send_telegram_message(
+                result
+            )
+
+            print(
+                "\nWaiting for next message...\n"
+            )
+
+
+
+# =========================================================
+# RUN PROGRAM
+# =========================================================
 
 if __name__ == "__main__":
 
-    main()
+    telegram_bot_loop()
